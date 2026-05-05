@@ -1,0 +1,10 @@
+**/.vs
+**/.vscode
+**/.idea
+**/bin
+**/obj
+**/.git
+.gitignore
+*.md
+**/appsettings.Development.json
+**/TestResults
