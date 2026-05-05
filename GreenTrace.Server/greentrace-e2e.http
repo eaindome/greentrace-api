@@ -1,0 +1,1307 @@
+### ==========================================================================
+### GreenTrace Server — End-to-End Manual Test Suite (Phase 1–5)
+###
+### HOW TO USE:
+###   1. Start the server: dotnet run (from GreenTrace.Server/)
+###      Seed runs automatically: admin@greentrace.io / Admin@123!
+###   2. Run requests top-to-bottom in order
+###   3. After each LOGIN → copy accessToken into the matching @...Token variable
+###   4. After each CREATE → run the follow-up QUERY to get the new ID,
+###      then fill it into the matching @...Id variable below
+###
+### Schema explorer (Banana Cake Pop): http://localhost:5227/graphql
+###
+### TODO — Integration Tests (tackle after manual testing passes):
+###   Priority paths to cover with automated tests:
+###     - Auth flow (login, token refresh, logout, expired token rejection)
+###     - Stage record lifecycle: draft → submit → validate (value record auto-creation)
+###     - Stage record rejection → re-submit → validate
+###     - Org-scoping: confirm one org cannot see another's data
+###     - Analytics query correctness against known seed data
+###     - Audit log entries written on every mutation
+### ==========================================================================
+
+@baseUrl = http://localhost:5227/graphql
+
+### ─── Tokens (paste accessToken value after each login) ─────────────────────
+@platformAdminToken = PASTE_TOKEN_HERE
+@orgAdminToken      = PASTE_TOKEN_HERE
+@fieldAgentToken    = PASTE_TOKEN_HERE
+@validatorToken     = PASTE_TOKEN_HERE
+
+### ─── Refresh tokens (paste refreshToken for Section 13) ────────────────────
+@fieldAgentRefreshToken = PASTE_REFRESH_TOKEN_HERE
+
+### ─── IDs — fill as you run through the tests ───────────────────────────────
+
+### Org (seeded org = 1; test org we create = most likely 2)
+@testOrgId        = 2
+
+### Chain config
+@domainId         = 0
+@stage1Id         = 0
+@stage2Id         = 0
+@stage3Id         = 0
+@stage4Id         = 0
+
+### Stage fields
+@sf_moistureId    = 0
+@sf_fermDaysId    = 0
+@sf_dryingId      = 0
+@sf_transportId   = 0
+@sf_receiptWtId   = 0
+@sf_procWeightId  = 0
+@sf_gradeId       = 0
+@sf_destId        = 0
+
+### Actor roles
+@role_farmerId    = 0
+@role_buyerId     = 0
+@role_processorId = 0
+@role_exporterId  = 0
+
+### Actors
+@actor_kofiId     = 0
+@actor_amaId      = 0
+@actor_kumasiId   = 0
+@actor_goldstarId = 0
+
+### Product & batches
+@productId        = 0
+@batchId          = 0
+@batchId2         = 0
+
+### Stage records
+@sr1Id            = 0
+@sr2Id            = 0
+@sr3Id            = 0
+@sr4Id            = 0
+@sr_rejectedId    = 0
+@sr_correctedId   = 0
+
+
+
+### ==========================================================================
+### SECTION 1 — PLATFORM ADMIN: AUTH & ORG SETUP
+### ==========================================================================
+
+### 1.1 — Login as Platform Admin (seeded)
+# → copy accessToken into @platformAdminToken above
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { login(input: { email: \"admin@greentrace.io\", password: \"Admin@123!\" }) { callResult { success message code result { accessToken refreshToken expiresAt } } } }"
+}
+
+###
+
+### 1.2 — Verify Platform Admin Identity
+# → expect role = platform_admin, full permissions list
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "query { me { userId organizationId fullName email role permissions } }"
+}
+
+###
+
+### 1.3 — List Existing Organizations
+# → should show seeded org: GreenTrace (id=1)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "query { organizations { nodes { id name slug isActive createdAt } totalCount } }"
+}
+
+###
+
+### 1.4 — Create Test Organization "Ghana Cocoa Authority"
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "mutation { createOrganization(input: { name: \"Ghana Cocoa Authority\", slug: \"gca\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 1.5 — Query Organizations (copy new org id into @testOrgId above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "query { organizations { nodes { id name slug isActive } totalCount } }"
+}
+
+###
+
+### 1.6 — Create Org Admin User for Test Org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "mutation { createUser(input: { email: \"orgadmin@gca.io\", password: \"OrgAdmin@123!\", fullName: \"GCA Admin\", organizationId: {{testOrgId}}, roleName: \"org_admin\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 1.7 — Create Field Agent User for Test Org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "mutation { createUser(input: { email: \"agent@gca.io\", password: \"Agent@123!\", fullName: \"Field Agent\", organizationId: {{testOrgId}}, roleName: \"field_agent\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 1.8 — Create Validator User for Test Org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "mutation { createUser(input: { email: \"validator@gca.io\", password: \"Validator@123!\", fullName: \"GCA Validator\", organizationId: {{testOrgId}}, roleName: \"validator\" }) { callResult { success message code } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 2 — ORG ADMIN: CHAIN CONFIGURATION
+### ==========================================================================
+
+### 2.1 — Login as Org Admin
+# → copy accessToken into @orgAdminToken above
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { login(input: { email: \"orgadmin@gca.io\", password: \"OrgAdmin@123!\" }) { callResult { success message code result { accessToken refreshToken expiresAt } } } }"
+}
+
+###
+
+### 2.2 — Verify Org Admin Identity
+# → expect role = org_admin, scoped to GCA org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { me { userId organizationId fullName role permissions } }"
+}
+
+###
+
+### 2.3 — Create Domain: Cocoa Supply Chain
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createDomain(input: { organizationId: {{testOrgId}}, name: \"Cocoa Supply Chain\", code: \"cocoa\", description: \"End-to-end cocoa traceability from farm to export\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.4 — Query Domains (copy id into @domainId above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { domains { nodes { id name code isActive } } }"
+}
+
+###
+
+### 2.5 — Create Stage 1: Harvesting
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStage(input: { domainId: {{domainId}}, name: \"Harvesting\", code: \"harvesting\", sequence: 1, isRequired: true, description: \"Farm-level harvest and initial processing\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.6 — Create Stage 2: Aggregation
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStage(input: { domainId: {{domainId}}, name: \"Aggregation\", code: \"aggregation\", sequence: 2, isRequired: true, description: \"Collection from farmers by licensed buyer\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.7 — Create Stage 3: Processing
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStage(input: { domainId: {{domainId}}, name: \"Processing\", code: \"processing\", sequence: 3, isRequired: false, description: \"Fermentation and drying at processing facility\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.8 — Create Stage 4: Export
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStage(input: { domainId: {{domainId}}, name: \"Export\", code: \"export\", sequence: 4, isRequired: true, description: \"Final export preparation and shipment\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.9 — Query Stages (copy ids into @stage1Id–@stage4Id above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { stages(order: { sequence: ASC }) { nodes { id name code sequence isRequired isActive } } }"
+}
+
+###
+
+### 2.10 — Create StageField: moisture_content (Stage 1)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage1Id}}, code: \"moisture_content\", label: \"Moisture Content (%)\", dataType: \"decimal\", isRequired: true, fieldOrder: 1, validation: \"{\\\"min\\\":0,\\\"max\\\":100}\", options: null, uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.11 — Create StageField: fermentation_days (Stage 1)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage1Id}}, code: \"fermentation_days\", label: \"Fermentation Days\", dataType: \"number\", isRequired: true, fieldOrder: 2, validation: \"{\\\"min\\\":0,\\\"max\\\":14}\", options: null, uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.12 — Create StageField: drying_method (Stage 1)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage1Id}}, code: \"drying_method\", label: \"Drying Method\", dataType: \"select\", isRequired: true, fieldOrder: 3, validation: null, options: \"[{\\\"value\\\":\\\"sun_dried\\\",\\\"label\\\":\\\"Sun Dried\\\"},{\\\"value\\\":\\\"machine_dried\\\",\\\"label\\\":\\\"Machine Dried\\\"}]\", uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.13 — Create StageField: transport_method (Stage 2)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage2Id}}, code: \"transport_method\", label: \"Transport Method\", dataType: \"select\", isRequired: true, fieldOrder: 1, validation: null, options: \"[{\\\"value\\\":\\\"truck\\\",\\\"label\\\":\\\"Truck\\\"},{\\\"value\\\":\\\"motorbike\\\",\\\"label\\\":\\\"Motorbike\\\"},{\\\"value\\\":\\\"head_carry\\\",\\\"label\\\":\\\"Head Carry\\\"}]\", uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.14 — Create StageField: weight_at_receipt (Stage 2)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage2Id}}, code: \"weight_at_receipt\", label: \"Weight at Receipt (kg)\", dataType: \"decimal\", isRequired: true, fieldOrder: 2, validation: \"{\\\"min\\\":0}\", options: null, uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.15 — Create StageField: processed_weight (Stage 3)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage3Id}}, code: \"processed_weight\", label: \"Processed Weight (kg)\", dataType: \"decimal\", isRequired: true, fieldOrder: 1, validation: \"{\\\"min\\\":0}\", options: null, uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.16 — Create StageField: grade (Stage 3)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage3Id}}, code: \"grade\", label: \"Quality Grade\", dataType: \"select\", isRequired: true, fieldOrder: 2, validation: null, options: \"[{\\\"value\\\":\\\"grade1\\\",\\\"label\\\":\\\"Grade 1 (Premium)\\\"},{\\\"value\\\":\\\"grade2\\\",\\\"label\\\":\\\"Grade 2 (Standard)\\\"},{\\\"value\\\":\\\"grade3\\\",\\\"label\\\":\\\"Grade 3 (Below Standard)\\\"}]\", uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.17 — Create StageField: export_destination (Stage 4)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createStageField(input: { stageId: {{stage4Id}}, code: \"export_destination\", label: \"Export Destination (Country)\", dataType: \"text\", isRequired: true, fieldOrder: 1, validation: null, options: null, uiHint: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.18 — Query All Stage Fields (copy ids into @sf_... variables above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { stageFields(order: { stageId: ASC, fieldOrder: ASC }) { nodes { id stageId code label dataType isRequired fieldOrder } } }"
+}
+
+###
+
+### 2.19 — Create ActorRole: Farmer
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActorRole(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, code: \"farmer\", label: \"Smallholder Farmer\", description: \"Primary cocoa producer\", allowedStages: [{{stage1Id}}] }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.20 — Create ActorRole: Licensed Buyer
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActorRole(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, code: \"licensed_buyer\", label: \"Licensed Buying Company\", description: \"COCOBOD-licensed cocoa buyer\", allowedStages: [{{stage2Id}}] }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.21 — Create ActorRole: Processor
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActorRole(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, code: \"processor\", label: \"Processing Company\", description: \"Cocoa processing facility\", allowedStages: [{{stage3Id}}] }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.22 — Create ActorRole: Exporter
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActorRole(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, code: \"exporter\", label: \"Export Company\", description: \"Cocoa exporter\", allowedStages: [{{stage4Id}}] }) { callResult { success message code } } }"
+}
+
+###
+
+### 2.23 — Query Actor Roles (copy ids into @role_...Id variables above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { actorRoles { nodes { id code label isActive } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 3 — ACTOR REGISTRATION
+### ==========================================================================
+
+### 3.1 — Create Actor: Kofi Mensah (Farmer)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActor(input: { organizationId: {{testOrgId}}, roleId: {{role_farmerId}}, name: \"Kofi Mensah\", externalId: \"FARMER-001\", contact: \"{\\\"phone\\\":\\\"+233201234567\\\"}\", location: \"{\\\"lat\\\":6.688,\\\"lng\\\":-1.624,\\\"region\\\":\\\"Ashanti\\\",\\\"community\\\":\\\"Atwima\\\"}\", registrationMeta: \"{\\\"coopMember\\\":true,\\\"coopName\\\":\\\"Atwima Farmers Coop\\\"}\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 3.2 — Create Actor: Ama Trading Co. (Licensed Buyer)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActor(input: { organizationId: {{testOrgId}}, roleId: {{role_buyerId}}, name: \"Ama Trading Co.\", externalId: \"BUYER-001\", contact: \"{\\\"phone\\\":\\\"+233302345678\\\",\\\"email\\\":\\\"ama@trading.gh\\\"}\", location: \"{\\\"region\\\":\\\"Ashanti\\\",\\\"city\\\":\\\"Kumasi\\\"}\", registrationMeta: \"{\\\"licenseNumber\\\":\\\"LBC-2024-0042\\\"}\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 3.3 — Create Actor: Kumasi Cocoa Mill (Processor)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActor(input: { organizationId: {{testOrgId}}, roleId: {{role_processorId}}, name: \"Kumasi Cocoa Mill Ltd\", externalId: \"PROC-001\", contact: \"{\\\"phone\\\":\\\"+233302456789\\\"}\", location: \"{\\\"region\\\":\\\"Ashanti\\\",\\\"city\\\":\\\"Kumasi\\\"}\", registrationMeta: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 3.4 — Create Actor: GoldStar Exports (Exporter)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createActor(input: { organizationId: {{testOrgId}}, roleId: {{role_exporterId}}, name: \"GoldStar Exports Ltd\", externalId: \"EXP-001\", contact: \"{\\\"phone\\\":\\\"+233302567890\\\",\\\"email\\\":\\\"info@goldstar.gh\\\"}\", location: \"{\\\"city\\\":\\\"Tema\\\"}\", registrationMeta: \"{\\\"exportLicense\\\":\\\"EXP-2024-0099\\\"}\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 3.5 — Query Actors (copy ids into @actor_...Id variables above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { actors { nodes { id name externalId isActive } } }"
+}
+
+###
+
+### 3.6 — Add Organic Certification Credential to Kofi Mensah
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createCredential(input: { actorId: {{actor_kofiId}}, type: \"organic_cert\", issuer: \"Ghana Organic Foundation\", reference: \"ORG-2024-789\", issuedAt: \"2024-01-15T00:00:00Z\", expiresAt: \"2026-01-14T00:00:00Z\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 3.7 — Query Credentials (verify Kofi's cert was created)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { credentials { nodes { id actorId type issuer reference issuedAt expiresAt isActive } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 4 — PRODUCT SETUP
+### ==========================================================================
+
+### 4.1 — Create Product: Cocoa Beans
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "mutation { createProduct(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, name: \"Cocoa Beans\", sku: \"COC-RAW\", unitOfMeasure: \"kg\", description: \"Raw unprocessed cocoa beans\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 4.2 — Query Products (copy id into @productId above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { products { nodes { id name sku unitOfMeasure isActive } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 5 — FIELD AGENT: BATCH CREATION
+### ==========================================================================
+
+### 5.1 — Login as Field Agent
+# → copy accessToken into @fieldAgentToken, refreshToken into @fieldAgentRefreshToken
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { login(input: { email: \"agent@gca.io\", password: \"Agent@123!\" }) { callResult { success message code result { accessToken refreshToken expiresAt } } } }"
+}
+
+###
+
+### 5.2 — Create Batch 1: GH-COC-2026-0001 (main happy-path batch)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { createBatch(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, productId: {{productId}}, batchCode: \"GH-COC-2026-0001\", originActorId: {{actor_kofiId}}, originDate: \"2026-04-20T06:00:00Z\", originLocation: \"{\\\"lat\\\":6.688,\\\"lng\\\":-1.624,\\\"region\\\":\\\"Ashanti\\\",\\\"community\\\":\\\"Atwima\\\"}\", initialQuantity: 500, initialUnitPrice: 1.50, metadata: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 5.3 — Create Batch 2: GH-COC-2026-0002 (for rejection flow in Section 7)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { createBatch(input: { organizationId: {{testOrgId}}, domainId: {{domainId}}, productId: {{productId}}, batchCode: \"GH-COC-2026-0002\", originActorId: {{actor_kofiId}}, originDate: \"2026-04-21T06:00:00Z\", originLocation: \"{\\\"lat\\\":6.690,\\\"lng\\\":-1.620,\\\"region\\\":\\\"Ashanti\\\",\\\"community\\\":\\\"Atwima\\\"}\", initialQuantity: 320, initialUnitPrice: 1.45, metadata: null }) { callResult { success message code } } }"
+}
+
+###
+
+### 5.4 — Query Batches (copy ids into @batchId and @batchId2 above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { batches { nodes { id batchCode status currentQuantity totalValue originDate } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 6 — STAGE RECORD LIFECYCLE: BATCH 1 (Happy Path)
+### 500kg farm → 480kg aggregation → 450kg processing → 450kg export
+### Expected total value: 500×1.50 + 480×2.10 + 450×4.00 + 450×8.50 = ~$7,533
+### Expected ValueRecords: 4 (one per validated stage record)
+### ==========================================================================
+
+### ─── STAGE 1: HARVESTING ────────────────────────────────────────────────────
+
+### 6.1 — [Field Agent] Create StageRecord 1: Harvesting (status = draft)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId}},
+      "stageId": {{stage1Id}},
+      "actorId": {{actor_kofiId}},
+      "quantity": 500,
+      "unitPrice": 1.50,
+      "currency": "USD",
+      "geoPoint": "{\"lat\":6.688,\"lng\":-1.624}",
+      "notes": "First harvest of the season. Good quality beans.",
+      "recordedAt": "2026-04-20T09:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_moistureId}}, "value": "7.2" },
+        { "stageFieldId": {{sf_fermDaysId}}, "value": "6" },
+        { "stageFieldId": {{sf_dryingId}}, "value": "sun_dried" }
+      ]
+    }
+  }
+}
+
+###
+
+### 6.2 — Query Stage Records (copy Harvesting record id into @sr1Id above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords { nodes { id batchId stageId status quantity unitPrice recordedAt } } }"
+}
+
+###
+
+### 6.3 — [Field Agent] Submit StageRecord 1
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr1Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.4 — Login as Validator
+# → copy accessToken into @validatorToken above
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { login(input: { email: \"validator@gca.io\", password: \"Validator@123!\" }) { callResult { success message code result { accessToken refreshToken expiresAt } } } }"
+}
+
+###
+
+### 6.5 — [Validator] Query Submitted Records (should see sr1 with status=submitted)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "query { stageRecords(where: { status: { eq: \"submitted\" } }) { nodes { id batchId stageId status quantity unitPrice } totalCount } }"
+}
+
+###
+
+### 6.6 — [Validator] Validate StageRecord 1
+# CRITICAL: This triggers automatic ValueRecord creation for this stage
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr1Id}}, validationNotes: \"Moisture content acceptable. Fermentation adequate.\" }) { callResult { success message code } } }"
+}
+
+###
+
+### ─── STAGE 2: AGGREGATION ───────────────────────────────────────────────────
+
+### 6.7 — [Field Agent] Create StageRecord 2: Aggregation
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId}},
+      "stageId": {{stage2Id}},
+      "actorId": {{actor_amaId}},
+      "quantity": 480,
+      "unitPrice": 2.10,
+      "currency": "USD",
+      "geoPoint": "{\"lat\":6.700,\"lng\":-1.610}",
+      "notes": "Received at aggregation point. 20kg transport loss noted.",
+      "recordedAt": "2026-04-22T14:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_transportId}}, "value": "truck" },
+        { "stageFieldId": {{sf_receiptWtId}}, "value": "480" }
+      ]
+    }
+  }
+}
+
+###
+
+### 6.8 — Query Stage Records (copy Aggregation record id into @sr2Id above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId}} } }) { nodes { id stageId status quantity unitPrice } } }"
+}
+
+###
+
+### 6.9 — [Field Agent] Add Evidence to StageRecord 2 (placeholder storageKey — no file upload yet)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { createEvidence(input: { stageRecordId: {{sr2Id}}, credentialId: null, storageKey: \"evidence/gca/batch-0001/aggregation-receipt.jpg\", originalFilename: \"aggregation-receipt.jpg\", mimeType: \"image/jpeg\", sizeBytes: 204800, type: \"photo\", description: \"Photo of bags at aggregation point\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.10 — [Field Agent] Submit StageRecord 2
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr2Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.11 — [Validator] Validate StageRecord 2
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr2Id}}, validationNotes: \"Weights verified. Transport documented with photo.\" }) { callResult { success message code } } }"
+}
+
+###
+
+### ─── STAGE 3: PROCESSING ─────────────────────────────────────────────────────
+
+### 6.12 — [Field Agent] Create StageRecord 3: Processing
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId}},
+      "stageId": {{stage3Id}},
+      "actorId": {{actor_kumasiId}},
+      "quantity": 450,
+      "unitPrice": 4.00,
+      "currency": "USD",
+      "geoPoint": null,
+      "notes": "30kg processing loss. Grade 1 output certified.",
+      "recordedAt": "2026-04-24T10:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_procWeightId}}, "value": "450" },
+        { "stageFieldId": {{sf_gradeId}}, "value": "grade1" }
+      ]
+    }
+  }
+}
+
+###
+
+### 6.13 — Query Stage Records (copy Processing record id into @sr3Id above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId}} } }) { nodes { id stageId status quantity unitPrice } } }"
+}
+
+###
+
+### 6.14 — [Field Agent] Submit StageRecord 3
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr3Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.15 — [Validator] Validate StageRecord 3
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr3Id}}, validationNotes: \"Grade 1 quality confirmed. Processing yield acceptable.\" }) { callResult { success message code } } }"
+}
+
+###
+
+### ─── STAGE 4: EXPORT ─────────────────────────────────────────────────────────
+
+### 6.16 — [Field Agent] Create StageRecord 4: Export
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId}},
+      "stageId": {{stage4Id}},
+      "actorId": {{actor_goldstarId}},
+      "quantity": 450,
+      "unitPrice": 8.50,
+      "currency": "USD",
+      "geoPoint": "{\"lat\":5.620,\"lng\":-0.017}",
+      "notes": "Loaded at Tema port. EUDR-compliant documentation attached.",
+      "recordedAt": "2026-04-25T08:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_destId}}, "value": "Netherlands" }
+      ]
+    }
+  }
+}
+
+###
+
+### 6.17 — Query Stage Records (copy Export record id into @sr4Id above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId}} } }) { nodes { id stageId status quantity unitPrice } } }"
+}
+
+###
+
+### 6.18 — [Field Agent] Submit StageRecord 4
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr4Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.19 — [Validator] Validate StageRecord 4
+# After this: Batch 1 has 4 ValueRecords, batch.totalValue ≈ $7,533
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr4Id}}, validationNotes: \"Export documentation verified. Shipped to Netherlands.\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 6.20 — Query Batch 1 (verify totalValue updated after all validations)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { batches(where: { id: { eq: {{batchId}} } }) { nodes { id batchCode status totalValue currentQuantity currentStageId } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 7 — REJECTION FLOW: BATCH 2
+### Tests: submit bad data → validator rejects → field agent corrects → validates
+### ==========================================================================
+
+### 7.1 — [Field Agent] Create StageRecord for Batch 2 with bad data (moisture=150%)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId2}},
+      "stageId": {{stage1Id}},
+      "actorId": {{actor_kofiId}},
+      "quantity": 320,
+      "unitPrice": 1.45,
+      "currency": "USD",
+      "geoPoint": null,
+      "notes": "Harvest data entry.",
+      "recordedAt": "2026-04-21T09:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_moistureId}}, "value": "150" },
+        { "stageFieldId": {{sf_fermDaysId}}, "value": "5" },
+        { "stageFieldId": {{sf_dryingId}}, "value": "sun_dried" }
+      ]
+    }
+  }
+}
+
+###
+
+### 7.2 — Query Stage Records for Batch 2 (copy id into @sr_rejectedId above)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId2}} } }) { nodes { id stageId status quantity fields { stageFieldId value } } } }"
+}
+
+###
+
+### 7.3 — [Field Agent] Submit the Bad Record
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr_rejectedId}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 7.4 — [Validator] Reject the Record
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { rejectStageRecord(input: { id: {{sr_rejectedId}}, validationNotes: \"Moisture content of 150% is physically impossible. Please re-enter correct value.\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 7.5 — [Field Agent] Create Corrected StageRecord for Batch 2
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation CreateSR($input: CreateStageRecordInput!) { createStageRecord(input: $input) { callResult { success message code } } }",
+  "variables": {
+    "input": {
+      "batchId": {{batchId2}},
+      "stageId": {{stage1Id}},
+      "actorId": {{actor_kofiId}},
+      "quantity": 320,
+      "unitPrice": 1.45,
+      "currency": "USD",
+      "geoPoint": null,
+      "notes": "Corrected record. Original moisture entry was a data entry error.",
+      "recordedAt": "2026-04-21T09:00:00Z",
+      "fields": [
+        { "stageFieldId": {{sf_moistureId}}, "value": "8.1" },
+        { "stageFieldId": {{sf_fermDaysId}}, "value": "5" },
+        { "stageFieldId": {{sf_dryingId}}, "value": "sun_dried" }
+      ]
+    }
+  }
+}
+
+###
+
+### 7.6 — Query Batch 2 Records (copy corrected record id into @sr_correctedId above)
+# Should see TWO records: one rejected, one draft (the corrected one)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId2}} } }) { nodes { id status notes fields { stageFieldId value } } } }"
+}
+
+###
+
+### 7.7 — [Field Agent] Submit Corrected Record
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr_correctedId}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 7.8 — [Validator] Validate Corrected Record
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{validatorToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr_correctedId}}, validationNotes: \"Corrected values accepted. Moisture content now within range.\" }) { callResult { success message code } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 8 — VALUE CHAIN QUERIES
+### ==========================================================================
+
+### 8.1 — Query All ValueRecords for Test Org
+# Expected: 5 records (4 for Batch 1 full journey, 1 for Batch 2 harvesting)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { valueRecords { nodes { id batchId stageId actorId quantity unitPrice totalValue currency validatedAt } totalCount } }"
+}
+
+###
+
+### 8.2 — Query ValueRecords for Batch 1 Only (ordered by id)
+# Expected: 4 records showing the full price journey
+# Harvesting: 500×1.50=$750 | Aggregation: 480×2.10=$1,008 | Processing: 450×4.00=$1,800 | Export: 450×8.50=$3,825
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { valueRecords(where: { batchId: { eq: {{batchId}} } }, order: { id: ASC }) { nodes { id stageId actorId quantity unitPrice totalValue currency validatedAt } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 9 — ANALYTICS QUERIES (all 5)
+### ==========================================================================
+
+### 9.1 — Batch Status Summary
+# Shows count of batches per status across the org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { batchStatusSummary { status count } }"
+}
+
+###
+
+### 9.2 — Value By Domain
+# Shows total value flowing through each supply chain domain
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { valueByDomain { domainId domainName totalValue currency } }"
+}
+
+###
+
+### 9.3 — Top Actors By Value (top 10)
+# GoldStar Exports should be #1 ($3,825), Kumasi Cocoa Mill #2 ($1,800)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { topActorsByValue(topN: 10) { actorId actorName totalValue currency recordCount } }"
+}
+
+###
+
+### 9.4 — Stage Completion Rates (for Cocoa domain)
+# Harvesting: 100% (2/2 batches), Export: 50% (1/2 batches — Batch 2 only made it to Stage 1)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { stageCompletionRates(domainId: {{domainId}}) { stageId stageName sequence batchCount completionRate } }"
+}
+
+###
+
+### 9.5 — Value Over Time (year 2026)
+# Should show April 2026 with total value from 5 validated records
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { valueOverTime(year: 2026) { year month totalValue recordCount } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 10 — AUDIT LOG
+### ==========================================================================
+
+### 10.1 — Query All Audit Logs (most recent first)
+# Should capture every create/update/validate/reject operation
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { auditLogs(order: { createdAt: DESC }) { nodes { id entityType entityId action changes createdAt } totalCount } }"
+}
+
+###
+
+### 10.2 — Query Audit Logs for StageRecord Operations Only
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { auditLogs(where: { entityType: { eq: \"StageRecord\" } }, order: { createdAt: DESC }) { nodes { id entityType entityId action changes createdAt } } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 11 — EDGE CASES & PERMISSION CHECKS
+### ==========================================================================
+
+### 11.1 — Try to delete a VALIDATED stage record (must fail — immutable)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { deleteStageRecord(input: { id: {{sr1Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 11.2 — Try to submit an already-validated record again (must fail)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { submitStageRecord(input: { id: {{sr1Id}} }) { callResult { success message code } } }"
+}
+
+###
+
+### 11.3 — Field agent tries to validate a record (must fail — no permission)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "mutation { validateStageRecord(input: { id: {{sr2Id}}, validationNotes: \"Trying to self-validate\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 11.4 — Org-scoping check: GCA org admin should only see GCA data (not seeded GreenTrace org data)
+# Organizations query for org_admin should return only their own org (or empty if scoped)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { organizations { nodes { id name slug } } }"
+}
+
+###
+
+### 11.5 — Unauthenticated request (no token — must return null/empty)
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "query { me { userId email role } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 12 — VERIFICATION QUERIES (Full Chain Config View)
+### ==========================================================================
+
+### 12.1 — List All Seeded Roles
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{platformAdminToken}}
+
+{
+  "query": "query { roles { nodes { id name description isActive } } }"
+}
+
+###
+
+### 12.2 — List Users in Test Org
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { users { nodes { id fullName email isActive } } }"
+}
+
+###
+
+### 12.3 — Stages with Their Fields (full chain config view)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { stages(where: { domainId: { eq: {{domainId}} } }, order: { sequence: ASC }) { nodes { id name code sequence isRequired stageFields { id code label dataType isRequired } } } }"
+}
+
+###
+
+### 12.4 — Full Batch 1 Journey (stage records with their captured fields)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { stageRecords(where: { batchId: { eq: {{batchId}} } }, order: { recordedAt: ASC }) { nodes { id stageId actorId status quantity unitPrice currency recordedAt validatedAt validationNotes fields { stageFieldId value } } } }"
+}
+
+###
+
+### 12.5 — Evidence Attached to Batch 1 Records
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { evidences { nodes { id stageRecordId type description storageKey originalFilename mimeType sizeBytes createdAt } } }"
+}
+
+###
+
+### 12.6 — Batch Lineages (should be empty — no splits/merges done in this test)
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{orgAdminToken}}
+
+{
+  "query": "query { batchLineages { nodes { id parentBatchId childBatchId type quantity } totalCount } }"
+}
+
+
+
+### ==========================================================================
+### SECTION 13 — AUTH: TOKEN REFRESH & LOGOUT
+### ==========================================================================
+
+### 13.1 — Refresh Field Agent Token
+# Paste the refreshToken from Step 5.1 login into @fieldAgentRefreshToken above
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { refreshAccessToken(input: { refreshToken: \"{{fieldAgentRefreshToken}}\" }) { callResult { success message code result { accessToken refreshToken expiresAt } } } }"
+}
+
+###
+
+### 13.2 — Logout Field Agent (invalidates refresh token)
+POST {{baseUrl}}
+Content-Type: application/json
+
+{
+  "query": "mutation { logout(input: { refreshToken: \"{{fieldAgentRefreshToken}}\" }) { callResult { success message code } } }"
+}
+
+###
+
+### 13.3 — Verify Logout: me query with invalidated token should return null
+POST {{baseUrl}}
+Content-Type: application/json
+Authorization: Bearer {{fieldAgentToken}}
+
+{
+  "query": "query { me { userId email role } }"
+}

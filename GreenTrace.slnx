@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="GreenTrace.Server/GreenTrace.Server.csproj" />
+  <Project Path="GreenTrace.Tests/GreenTrace.Tests.csproj" />
+</Solution>
