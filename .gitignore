@@ -40,6 +40,7 @@ appsettings.Staging.json
 secrets.json
 *.pfx
 *.p12
+.env
 
 ## Logs
 *.log
